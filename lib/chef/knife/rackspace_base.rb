@@ -71,12 +71,12 @@ class Chef
         Chef::Config[:knife][key] || config[key]
       end
 
-      def private_ip_addr(server)
-        @private_ip_addr ||= begin
-          server.addresses["private"][0]
-        end	  
+      def msg_pair(label, value, color=:cyan)
+        if value && !value.to_s.empty?
+          puts "#{ui.color(label, color)}: #{value}"
+        end
       end
-	  
+
       def public_dns_name(server)
         @public_dns_name ||= begin
           Resolv.getname(server.addresses["public"][0])
@@ -87,3 +87,4 @@ class Chef
     end
   end
 end
+

@@ -57,6 +57,12 @@ class Chef
         :long => "--node-name NAME",
         :description => "The Chef node name for your new node"
 
+      option :private_network,
+        :long => "--private-network",
+        :description => "Use the private IP for bootstrapping rather than the public IP",
+        :boolean => true,
+        :default => false
+
       option :ssh_user,
         :short => "-x USERNAME",
         :long => "--ssh-user USERNAME",
@@ -85,9 +91,9 @@ class Chef
       option :distro,
         :short => "-d DISTRO",
         :long => "--distro DISTRO",
-        :description => "Bootstrap a distro using a template; default is 'ubuntu10.04-gems'",
+        :description => "Bootstrap a distro using a template; default is 'chef-full'",
         :proc => Proc.new { |d| Chef::Config[:knife][:distro] = d },
-        :default => "ubuntu10.04-gems"
+        :default => "chef-full"
 
       option :template_file,
         :long => "--template-file TEMPLATE",
@@ -102,6 +108,13 @@ class Chef
         :proc => lambda { |o| o.split(/[\s,]+/) },
         :default => []
 
+      option :first_boot_attributes,
+        :short => "-j JSON_ATTRIBS",
+        :long => "--json-attributes",
+        :description => "A JSON string to be added to the first run of chef-client",
+        :proc => lambda { |o| JSON.parse(o) },
+        :default => {}
+
       option :rackspace_metadata,
         :short => "-M JSON",
         :long => "--rackspace-metadata JSON",
@@ -109,19 +122,11 @@ class Chef
         :proc => Proc.new { |m| Chef::Config[:knife][:rackspace_metadata] = JSON.parse(m) },
         :default => ""
 		
-      option :ssh_network,
-	    :short => "-n NETWORK",
-	    :long => "--network NETWORK",
-	    :description => "Choose private or public network of server for bootstrap to connect to; default is 'public'",
-	    :proc => Proc.new { |n| Chef::Config[:knife][:ssh_network] = n },
-	    :default => "public"
-
-      option :adtl_runlist,
-        :short => "-z RUN_LIST",
-        :long => "--adtl-runlist RUN_LIST",
-        :description => "Comma separated list of roles/recipes to apply",
-        :proc => lambda { |o| o.split(/[\s,]+/) },
-        :default => []
+      option :host_key_verify,
+        :long => "--[no-]host-key-verify",
+        :description => "Verify host key, enabled by default",
+        :boolean => true,
+        :default => true
 
       def tcp_test_ssh(hostname)
         tcp_socket = TCPSocket.new(hostname, 22)
@@ -162,12 +167,12 @@ class Chef
           :metadata => Chef::Config[:knife][:rackspace_metadata]
         )
 
-        puts "#{ui.color("Instance ID", :cyan)}: #{server.id}"
-        puts "#{ui.color("Host ID", :cyan)}: #{server.host_id}"
-        puts "#{ui.color("Name", :cyan)}: #{server.name}"
-        puts "#{ui.color("Flavor", :cyan)}: #{server.flavor.name}"
-        puts "#{ui.color("Image", :cyan)}: #{server.image.name}"
-        puts "#{ui.color("Metadata", :cyan)}: #{server.metadata}"
+        msg_pair("Instance ID", server.id)
+        msg_pair("Host ID", server.host_id)
+        msg_pair("Name", server.name)
+        msg_pair("Flavor", server.flavor.name)
+        msg_pair("Image", server.image.name)
+        msg_pair("Metadata", server.metadata)
 
         print "\n#{ui.color("Waiting server", :magenta)}"
 
@@ -176,23 +181,31 @@ class Chef
 
         puts("\n")
 
-        puts "#{ui.color("Public DNS Name", :cyan)}: #{public_dns_name(server)}"
-        puts "#{ui.color("Public IP Address", :cyan)}: #{server.addresses["public"][0]}"
-        puts "#{ui.color("Private IP Address", :cyan)}: #{server.addresses["private"][0]}"
-        puts "#{ui.color("Password", :cyan)}: #{server.password}"
+        msg_pair("Public DNS Name", public_dns_name(server))
+        msg_pair("Public IP Address", server.addresses['public'][0])
+        msg_pair("Private IP Address", server.addresses['private'][0])
+        msg_pair("Password", server.password)
 
         print "\n#{ui.color("Waiting for sshd", :magenta)}"
 
-        if Chef::Config[:knife][:ssh_network] == "private"
-           print(".") until tcp_test_ssh(server.addresses["private"][0]) { sleep @initial_sleep_delay ||= 10; puts("done") }	
-        else
-           print(".") until tcp_test_ssh(server.addresses["public"][0]) { sleep @initial_sleep_delay ||= 10; puts("done") }
+        #which IP address to bootstrap
+        bootstrap_ip_address = server.addresses['public'][0] if server.public_ip_address
+        if config[:private_network]
+          bootstrap_ip_address = server.addresses['private'][0]
+        end
+        Chef::Log.debug("Bootstrap IP Address #{bootstrap_ip_address}")
+        if bootstrap_ip_address.nil?
+          ui.error("No IP address available for bootstrapping.")
+          exit 1
         end
 
-        bootstrap_for_node(server,1).run
-        sleep(15)
-        bootstrap_for_node(server,2).run
-        
+        print(".") until tcp_test_ssh(bootstrap_ip_address) {
+          sleep @initial_sleep_delay ||= 10
+          puts("done")
+        }
+
+        bootstrap_for_node(server, bootstrap_ip_address).run
+
         puts "\n"
         puts "#{ui.color("Instance ID", :cyan)}: #{server.id}"
         puts "#{ui.color("Host ID", :cyan)}: #{server.host_id}"
@@ -206,25 +219,17 @@ class Chef
         puts "#{ui.color("Password", :cyan)}: #{server.password}"
         puts "#{ui.color("Environment", :cyan)}: #{config[:environment] || '_default'}"
         puts "#{ui.color("Run List", :cyan)}: #{config[:run_list].join(', ')}"
-        puts "#{ui.color("Adtl Run List", :cyan)}: #{config[:adtl_runlist].join(', ')}"
       end
 
-      def bootstrap_for_node(server,iter)
+      def bootstrap_for_node(server, bootstrap_ip_address)
         bootstrap = Chef::Knife::Bootstrap.new
-        
-        if Chef::Config[:knife][:ssh_network] == "private"  
-            bootstrap.name_args = [private_ip_addr(server)]
-        else
-            bootstrap.name_args = [public_dns_name(server)]
-        end
-        if iter == "1"
-            bootstrap.config[:run_list] = config[:run_list]
-        else
-            bootstrap.config[:run_list] = config[:adtl_runlist]
-        end
+        bootstrap.name_args = [bootstrap_ip_address]
+        bootstrap.config[:run_list] = config[:run_list]
+        bootstrap.config[:first_boot_attributes] = config[:first_boot_attributes]
         bootstrap.config[:ssh_user] = config[:ssh_user] || "root"
         bootstrap.config[:ssh_password] = server.password
         bootstrap.config[:identity_file] = config[:identity_file]
+        bootstrap.config[:host_key_verify] = config[:host_key_verify]
         bootstrap.config[:chef_node_name] = config[:chef_node_name] || server.id
         bootstrap.config[:prerelease] = config[:prerelease]
         bootstrap.config[:bootstrap_version] = locate_config_value(:bootstrap_version)

@@ -49,14 +49,14 @@ class Chef
             case server.state.downcase
             when 'deleted','suspended'
               ui.color(server.state.downcase, :red)
-            when 'build'
+            when 'build','unknown'
               ui.color(server.state.downcase, :yellow)
             else
               ui.color(server.state.downcase, :green)
             end
           end
         end
-        puts ui.list(server_list, :columns_across, 7)
+        puts ui.list(server_list, :uneven_columns_across, 7)
 
       end
     end
